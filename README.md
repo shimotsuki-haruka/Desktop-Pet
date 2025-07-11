@@ -1,4 +1,5 @@
 # Desktop-Pet
+![Finished Product](images/final.png)
 This project drew inspiration from the project of Bilibili uploader MetaWu.  
 Original project website:[Click here](https://github.com/MetaWu2077/Esp32_VoiceChat_LLMs)  
 It is based on esp32 and is mainly used for voice conversations through large language models.  
