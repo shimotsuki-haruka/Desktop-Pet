@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <ESP32Servo.h>
 #include "base64.h"
 #include "WiFi.h"
 #include <WiFiClientSecure.h>
@@ -8,6 +7,14 @@
 #include "Audio2.h"
 #include <ArduinoJson.h>
 #include <ArduinoWebsockets.h>
+#include <ESP32Servo.h>
+
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "frames.h" // 假设帧数据头文件路径正确
+
 using namespace websockets;
 
 #define key 0
@@ -15,9 +22,19 @@ using namespace websockets;
 #define led3 2
 #define led2 18
 #define led1 19
+
+
+
+// OLED 全局对象
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
 const char *wifiData[][2] = {
-    {"shimo", "u47ygi95"}, // 替换为自己常用的wifi名和密码
-    // {"222", "12345678"},
+    {"onepluslc", "xgf10000fGoldA"}, // 替换为自己常用的wifi名和密码
+    {"shimo", "u47ygi95"},
     // 继续添加需要的 Wi-Fi 名称和密码
 };
 
@@ -29,11 +46,23 @@ bool ledstatus = true;
 bool startPlay = false;
 bool lastsetence = false;
 bool isReady = false;
+
 unsigned long urlTime = 0;
 unsigned long pushTime = 0;
 int mainStatus = 0;
 int receiveFrame = 0;
 int noise = 50;
+
+// // 表情动画状态
+// bool isEmotionAnimating = false;   // 是否正在播放动画
+int currentFrame = 0;              // 当前显示的帧索引
+// int frameStart = 0;                // 动画起始帧
+// int frameEnd = 0;                  // 动画结束帧
+// unsigned long frameDelay = 100;     // 帧间延迟（毫秒）
+// unsigned long lastFrameTime = 0;    // 上一帧更新时间戳
+
+const char* currentEmotion = "cute";  // 默认值
+
 HTTPClient https;
 
 hw_timer_t *timer = NULL;
@@ -44,9 +73,9 @@ uint8_t adc_complete_flag = 0;
 Audio1 audio1;
 Audio2 audio2(false, 3, I2S_NUM_1);
 
-#define I2S_DOUT 27 // DIN
-#define I2S_BCLK 26 // BCLK
-#define I2S_LRC 25  // LRC
+#define I2S_DOUT 25 // DIN
+#define I2S_BCLK 27 // BCLK
+#define I2S_LRC 26  // LRC
 
 #define PWM1 4  //lower servo
 #define PWM2 16 //upper servo
@@ -59,7 +88,7 @@ int currentAngle1 = 90, currentAngle2 = 90;
 int targetAngle1 = 90, targetAngle2 = 90;
 unsigned long lastUpdateTime = 0;
 const int angleStep = 1; // 每次变化 1°
-const unsigned long stepInterval = 20; 
+const unsigned long stepInterval = 20;
 
 void gain_token(void);
 void getText(String role, String content);
@@ -79,6 +108,7 @@ DynamicJsonDocument gen_params(const char *appid, const char *domain);
 
 String askquestion = "";
 String Answer = "";
+String rawResponseJson; // 全局变量，保存原始响应
 
 const char *appId1 = "96fc4b7c"; // 替换为自己的星火大模型参数
 const char *domain1 = "generalv3.5";
@@ -90,8 +120,148 @@ WebsocketsClient webSocketClient;
 WebsocketsClient webSocketClient1;
 
 int loopcount = 0;
+
+// 显示指定帧图像
+void showFrame(int frameIndex) {
+  display.clearDisplay();
+  display.drawBitmap(0, 0, epd_bitmap_allArray[frameIndex], SCREEN_WIDTH, SCREEN_HEIGHT, WHITE);
+  display.display(); // 更新屏幕
+}
+
+unsigned long lastEmotionFrameTime = 0;
+int emotionStartFrame = 0;
+int emotionEndFrame = 0;
+bool showingEmotion = false;
+
+void updateEmotionDisplay() {
+  if (!showingEmotion) return;
+
+  unsigned long now = millis();
+  if (now - lastEmotionFrameTime > 50) { // 每 50ms 显示一帧
+    if (currentFrame <= emotionEndFrame) {
+      showFrame(currentFrame++);
+      lastEmotionFrameTime = now;
+    } else {
+      showingEmotion = false; // 表情播完
+    }
+  }
+}
+
+void startEmotion(const char* emotion) {
+  if (strcmp(emotion, "angry") == 0) {
+    emotionStartFrame = 287; emotionEndFrame = 392;
+  } else if (strcmp(emotion, "happy") == 0) {
+    emotionStartFrame = 393; emotionEndFrame = 466;
+  } else if (strcmp(emotion, "evil") == 0) {
+    emotionStartFrame = 0; emotionEndFrame = 32;
+  } else if (strcmp(emotion, "cute") == 0) {
+    emotionStartFrame = 33; emotionEndFrame = 76;
+  } else if (strcmp(emotion, "sad") == 0) {
+    emotionStartFrame = 77; emotionEndFrame = 136;
+  } else if (strcmp(emotion, "squint") == 0) {
+    emotionStartFrame = 137; emotionEndFrame = 205;
+  } else if (strcmp(emotion, "love") == 0) {
+    emotionStartFrame = 206; emotionEndFrame = 286;
+  } else {
+    emotionStartFrame = 33; emotionEndFrame = 76; // 默认 cute
+  }
+
+  currentFrame = emotionStartFrame;
+  showingEmotion = true;
+  lastEmotionFrameTime = millis();
+}
+
+
+String filterString(const String& input) {
+  String filtered = "";
+  for (size_t i = 0; i < input.length(); i++) {
+    char c = input.charAt(i);
+    
+    // 处理单字节字符 (ASCII)
+    if (c >= 32 && c <= 126) {  // 保留常用ASCII字符 (空格、字母、数字、标点)
+      filtered += c;
+      continue;
+    }
+    
+    // 处理多字节字符 (UTF-8)
+    if ((c & 0xE0) == 0xC0 && i + 1 < input.length()) {
+      // 2字节UTF-8字符 (范围: U+0080 to U+07FF)
+      filtered += c;
+      filtered += input.charAt(++i);
+    } 
+    else if ((c & 0xF0) == 0xE0 && i + 2 < input.length()) {
+      // 3字节UTF-8字符 (范围: U+0800 to U+FFFF)
+      // 中文字符通常在这个范围内 (U+4E00 to U+9FFF)
+      char c1 = input.charAt(i + 1);
+      char c2 = input.charAt(i + 2);
+      
+      // 检查是否为中文字符 (简化版判断)
+      if (c >= 0xE4 && c <= 0xE9) {
+        filtered += c;
+        filtered += c1;
+        filtered += c2;
+        i += 2;
+      }
+    }
+    // 其他情况忽略 (包括4字节表情符号等)
+  }
+  return filtered;
+}
+
+const char* sendToFlask(String answerText) {
+
+  static char emotion[20] = "cute"; // 静态存储情感字符串，确保函数返回后仍有效
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi 未连接，无法发送情感分析请求");
+    return emotion;
+  }
+
+  HTTPClient http;
+  String flaskUrl = "http://192.168.118.161:5000/emotion"; // 替换为你的 PC IP
+  
+  http.begin(flaskUrl);
+  http.addHeader("Content-Type", "application/json");
+
+  DynamicJsonDocument requestJson(1024);
+  requestJson["text"] = filterString(answerText);
+  String requestData;
+  serializeJson(requestJson, requestData);
+
+  // 发送 POST 请求
+  int httpCode = http.POST(requestData);
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    Serial.println("Flask result：");
+    Serial.println(response); // 打印类似 {"emotion":"love","sentiment_score":0.8454}
+
+    // 解析响应 JSON
+    DynamicJsonDocument responseJson(1024);
+    deserializeJson(responseJson, response);
+    
+    // 提取情感标签（如 "love"、"happy"）
+    const char* responseEmotion = responseJson["emotion"];
+    strncpy(emotion, responseEmotion, sizeof(emotion) - 1);
+    emotion[sizeof(emotion) - 1] = '\0'; // 确保字符串以空字符结尾
+    
+
+  } else {
+    Serial.print("Flask no: ");
+    Serial.println(httpCode);
+  }
+  
+  http.end();
+  return emotion; // 返回提取的情感或默认值
+}
+
+
+
 void onMessageCallback(WebsocketsMessage message)
 {
+    rawResponseJson = message.data(); // 保存原始 JSON 字符串
+    Serial.println("原始 JSON 响应：");
+    Serial.println(rawResponseJson); // 打印到串口
+
     StaticJsonDocument<4096> jsonDocument;
     DeserializationError error = deserializeJson(jsonDocument, message.data());
 
@@ -110,10 +280,13 @@ void onMessageCallback(WebsocketsMessage message)
             receiveFrame++;
             Serial.print("receiveFrame:");
             Serial.println(receiveFrame);
+
+
             JsonObject choices = jsonDocument["payload"]["choices"];
             int status = choices["status"];
             const char *content = choices["text"][0]["content"];
             Serial.println(content);
+
             Answer += content;
             String answer = "";
             if (Answer.length() >= 120 && (audio2.isplaying == 0))
@@ -167,6 +340,13 @@ void onMessageCallback(WebsocketsMessage message)
             if (status == 2)
             {
                 getText("assistant", Answer);
+                Serial.println("The anssor is");
+                Serial.println(Answer);
+
+                // 发送回复文本到 Flask 进行情感分析
+                currentEmotion = sendToFlask(Answer);
+                
+
                 if (Answer.length() <= 80 && (audio2.isplaying == 0))
                 {
                     // getText("assistant", Answer);
@@ -233,6 +413,9 @@ void onMessageCallback1(WebsocketsMessage message)
             int status = jsonDocument["data"]["status"];
             if (status == 2)
             {
+                // 发送回复文本到 Flask 进行情感分析
+
+
                 Serial.println("status == 2");
                 webSocketClient1.close();
                 if (askquestion == "")
@@ -474,12 +657,14 @@ void voicePlay()
         {
             secondPeriodIndex = firstPeriodIndex;
         }
+        // String currentSentence;
 
         if (secondPeriodIndex != -1)
         {
             String answer = Answer.substring(0, secondPeriodIndex + 1);
             Serial.print("answer: ");
             Serial.println(answer);
+            // sendToFlask(answer); // 传入 Answer 字符串
             Answer = Answer.substring(secondPeriodIndex + 2);
             audio2.connecttospeech(answer.c_str(), "zh");
         }
@@ -506,6 +691,7 @@ void voicePlay()
                 Answer = Answer.substring(lastChineseSentenceIndex + 2);
             }
         }
+
         startPlay = true;
     }
     else
@@ -606,7 +792,7 @@ void updateServoSmoothly() {
   if (millis() - lastServoMoveTime > 10000 && !servoMoving) {
     // 每10秒生成一次新目标角度
     targetAngle1 = random(45, 135);
-    targetAngle2 = random(0, 45);
+    targetAngle2 = random(90, 135);
     Serial.printf("Target servo1: %d, servo2: %d\n", targetAngle1, targetAngle2);
     servoMoving = true;
     lastUpdateTime = millis();
@@ -644,10 +830,21 @@ void updateServoSmoothly() {
   }
 }
 
+
 void setup()
 {
     // String Date = "Fri, 22 Mar 2024 03:35:56 GMT";
     Serial.begin(115200);
+
+    // 初始化 OLED
+    Wire.begin(5, 17); // SDA=5, SCL=17
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println(F("SSD1306 初始化失败"));
+        for (;;);
+    }
+    display.clearDisplay();
+    display.setTextColor(WHITE);
+
     // pinMode(ADC,ANALOG);
     pinMode(key, INPUT_PULLUP);
     pinMode(34, INPUT_PULLUP);
@@ -659,11 +856,10 @@ void setup()
 
     servo1.attach(PWM1);
     servo2.attach(PWM2);
-    servo1.write(90);
+    servo1.write(45);
     servo2.write(45);
     delay(1000);
-    //servo1.write(0);
-    //delay(1000);
+
 
     int numNetworks = sizeof(wifiData) / sizeof(wifiData[0]);
     wifiConnect(wifiData, numNetworks);
@@ -686,6 +882,7 @@ void loop()
 
     webSocketClient.poll();
     webSocketClient1.poll();
+
     // delay(10);
     if (startPlay)
     {
@@ -697,10 +894,21 @@ void loop()
     if (audio2.isplaying == 1)
     {
         digitalWrite(led3, HIGH);
+        if (!showingEmotion) {
+        startEmotion(currentEmotion);
+        }
+        updateEmotionDisplay();
+
     }
     else
     {
+        // showEmotion("cute");
         digitalWrite(led3, LOW);
+        if (!showingEmotion || currentEmotion != "cute") {
+            currentEmotion = "cute";
+            startEmotion("cute");
+        }
+        updateEmotionDisplay();
         if ((urlTime + 240000 < millis()) && (audio2.isplaying == 0))
         {
             urlTime = millis();
@@ -715,6 +923,7 @@ void loop()
         audio2.isplaying = 0;
         startPlay = false;
         isReady = false;
+
         Answer = "";
         Serial.printf("Start recognition\r\n\r\n");
 
@@ -735,6 +944,8 @@ void loop()
         // delay(6000);
         // audio1.Record();
         adc_complete_flag = 0;
+
+
 
         // Serial.println(text);
         // checkLen(text);
